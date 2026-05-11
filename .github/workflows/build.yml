@@ -1,0 +1,74 @@
+name: Build IPA
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+
+      - name: Create Local.xcconfig
+        run: |
+          echo "DEVELOPMENT_TEAM = ${{ secrets.APPLE_TEAM_ID }}" > Local.xcconfig
+          echo "CODE_SIGN_IDENTITY = " >> Local.xcconfig
+          echo "CODE_SIGNING_REQUIRED = NO" >> Local.xcconfig
+          echo "CODE_SIGNING_ALLOWED = NO" >> Local.xcconfig
+
+      - name: Resolve SPM dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project CloudNow.xcodeproj \
+            -scheme CloudNow
+
+      - name: Build archive
+        run: |
+          xcodebuild archive \
+            -project CloudNow.xcodeproj \
+            -scheme CloudNow \
+            -destination "generic/platform=tvOS" \
+            -archivePath ${{ runner.temp }}/CloudNow.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            SKIP_INSTALL=NO \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+            | xcpretty || true
+          
+          # Fallback: check if archive was created even if xcpretty masked errors
+          ls -la ${{ runner.temp }}/CloudNow.xcarchive/Products/Applications/
+
+      - name: Package IPA (unsigned)
+        run: |
+          APP_PATH="${{ runner.temp }}/CloudNow.xcarchive/Products/Applications/CloudNow.app"
+          mkdir -p /tmp/Payload
+          cp -r "$APP_PATH" /tmp/Payload/CloudNow.app
+          cd /tmp
+          zip -r CloudNow.ipa Payload
+          echo "IPA_PATH=/tmp/CloudNow.ipa" >> $GITHUB_ENV
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CloudNow-${{ github.sha }}
+          path: /tmp/CloudNow.ipa
+          retention-days: 30
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: /tmp/CloudNow.ipa
+          generate_release_notes: true
